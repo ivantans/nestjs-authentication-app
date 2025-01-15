@@ -6,7 +6,7 @@ import * as argon2 from 'argon2';
 import { Tokens, UserData } from './types';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 
 @Injectable()
 export class AuthService {
@@ -42,9 +42,21 @@ export class AuthService {
     }
   }
 
-  async signIn(req: Request): Promise<UserData>{
+  async signIn(req: Request, res: Response): Promise<UserData> {
     const tokens = await this.getTokens(req.user.uuid, req.user.email);
     await this.updateRT(req.user.uuid, tokens.refreshToken);
+
+    res.cookie("access_token", tokens.accessToken, {
+      httpOnly: true,
+      secure: true,
+      maxAge: 7 * 24 * 60 * 60 * 10000 // 7 hari
+    });
+
+    res.cookie("refresh_token", tokens.refreshToken, {
+      httpOnly: true,
+      secure: true,
+      maxAge: 30 * 24 * 60 * 60 * 10000 // 30 hari
+    });
 
     return {
       uuid: req.user.uuid,
@@ -114,6 +126,22 @@ export class AuthService {
     }
   }
 
+  async getAccessToken(uuid: string, email: string): Promise<string> {
+    const payload = {
+      sub: uuid,
+      email
+    }
+
+    const at = await this.jwtService.signAsync(
+      payload,
+      {
+        expiresIn: "15m",
+        secret: this.configService.get<string>("AT_SECRET")
+      }
+    )
+    return at;
+  }
+
   private async updateRT(uuid: string, rt: string) {
     const hashedRT = await argon2.hash(rt);
 
@@ -125,5 +153,27 @@ export class AuthService {
         rt: hashedRT
       }
     });
+  }
+
+  async validateRT(uuid: string, rt: string): Promise<Boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { uuid }
+    });
+
+    if (!user) {
+      throw new UnauthorizedException("Invalid Credentials.");
+    }
+
+    const isRTValid = await this.compareRT(user.rt, rt)
+
+    if (!isRTValid) {
+      throw new UnauthorizedException("Invalid Credentials.")
+    }
+
+    return true
+  }
+
+  private async compareRT(hashedRT: string, rt: Buffer | string): Promise<boolean> {
+    return argon2.verify(hashedRT, rt);
   }
 }
